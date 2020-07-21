@@ -18,6 +18,7 @@ import tensorflow as tf
 
 import utils.train_utils
 import time
+import tqdm
 
 import random
 
@@ -35,6 +36,12 @@ def make_val_dir(hypes, validation=True):
         os.mkdir(val_dir)
     return val_dir
 
+def make_feature_dir(hypes):
+    feature_dir = os.path.join(hypes['dirs']['output_dir'], 'conv_features')
+    if not os.path.exists(feature_dir):
+        os.mkdir(feature_dir)
+    return feature_dir
+
 
 def make_img_dir(hypes):
     val_dir = os.path.join(hypes['dirs']['output_dir'], 'val_images')
@@ -51,9 +58,9 @@ def write_rects(rects, filename):
             print(string, file=f)
 
 
-def evaluate(hypes, sess, image_pl, softmax):
+def evaluate(hypes, sess, image_pl, softmax, encoder_out):
     pred_annolist, image_list, dt, dt2 = get_results(
-        hypes, sess, image_pl, softmax, True)
+        hypes, sess, image_pl, softmax, True, encoder_out)
 
     val_path = make_val_dir(hypes)
 
@@ -110,8 +117,10 @@ def evaluate(hypes, sess, image_pl, softmax):
     return eval_list, image_list
 
 
-def get_results(hypes, sess, image_pl, decoded_logits, validation=True):
-
+def get_results(hypes, sess, image_pl, decoded_logits, validation=True, encoder_out=None):
+    pred_encoder = None
+    if encoder_out is not None:
+        pred_encoder = encoder_out['deep_feat']
     if hypes['use_rezoom']:
         pred_boxes = decoded_logits['pred_boxes_new']
     else:
@@ -131,6 +140,7 @@ def get_results(hypes, sess, image_pl, decoded_logits, validation=True):
 
     val_dir = make_val_dir(hypes, validation)
     img_dir = make_img_dir(hypes)
+    feature_dir = make_feature_dir(hypes)
 
     image_list = []
 
@@ -139,7 +149,7 @@ def get_results(hypes, sess, image_pl, decoded_logits, validation=True):
     files = [line.rstrip() for line in open(kitti_txt)]
     base_path = os.path.realpath(os.path.dirname(kitti_txt))
 
-    for i, file in enumerate(files):
+    for i, file in tqdm.tqdm(enumerate(files), total=len(files)):
         image_file = file.split(" ")[0]
         if not validation and random.random() > 0.2:
             continue
@@ -149,9 +159,18 @@ def get_results(hypes, sess, image_pl, decoded_logits, validation=True):
                                            hypes["image_width"]),
                                 interp='cubic')
         feed = {image_pl: img}
-        (np_pred_boxes, np_pred_confidences) = sess.run([pred_boxes,
-                                                         pred_confidences],
-                                                        feed_dict=feed)
+
+        if encoder_out is not None:
+            (np_pred_boxes, np_pred_confidences, np_refined_global_corners, encoded_features) = sess.run([pred_boxes, pred_confidences, refined_global_corners, pred_encoder], feed_dict=feed)            
+            feature_name = os.path.basename(image_file).split('.')[0]
+            feature_filepath = os.path.join(feature_dir, feature_name)
+            np.save(feature_filepath, encoded_features)
+        else:
+            (np_pred_boxes, np_pred_confidences, np_refined_global_corners) = sess.run([pred_boxes, pred_confidences, refined_global_corners], feed_dict=feed)
+
+        #(np_pred_boxes, np_pred_confidences) = sess.run([pred_boxes,
+                                                         #pred_confidences],
+                                                        #feed_dict=feed)
         pred_anno = AnnLib.Annotation()
         pred_anno.imageName = image_file
         new_img, rects = utils.train_utils.add_rectangles(
@@ -160,7 +179,7 @@ def get_results(hypes, sess, image_pl, decoded_logits, validation=True):
             use_stitching=True, rnn_len=hypes['rnn_len'],
             min_conf=0.50, tau=hypes['tau'], color_acc=(0, 255, 0))
 
-        if validation and i % 15 == 0:
+        if validation and i % 30 == 0:
             image_name = os.path.basename(pred_anno.imageName)
             image_name = os.path.join(img_dir, image_name)
             scp.misc.imsave(image_name, new_img)
